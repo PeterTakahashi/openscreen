@@ -30,6 +30,9 @@ import type { CliDoneResult, CliExportRequest } from "@/lib/cliContracts";
 import { GIF_SIZE_PRESETS, type GifSizePreset } from "@/lib/exporter";
 import { calculateMp4ExportSettings } from "@/lib/exporter/mp4ExportSettings";
 import { mixVoiceoverIntoVideo } from "@/lib/exporter/voiceoverMix";
+import type { FocusRecordingData } from "@/lib/windowFocus/contracts";
+import { FOCUS_SIDECAR_SUFFIX } from "@/lib/windowFocus/contracts";
+import { focusTelemetryToZoomRegions } from "@/lib/windowFocus/focusToZoomRegions";
 import { exportGifNative, exportMultiNative, nativeBridgeClient } from "@/native";
 import type { CompositorClipInput } from "@/native/contracts";
 import { buildSceneDescription, resolveVisibleClips } from "@/native/sceneDescription";
@@ -215,6 +218,30 @@ async function runExport(request: CliExportRequest): Promise<CliDoneResult> {
 	}
 	if (probed.durationMs > 0) {
 		axcutDocument = applyProbedDuration(axcutDocument, primaryAssetId, probed.durationMs / 1000);
+	}
+
+	// Display-recording follow mode: turn the window-focus timeline into zoom
+	// regions on the migrated document. (Multi-window switch mode is detected
+	// separately via the .multiwindow.json manifest.)
+	if (request.followWindows) {
+		const sidecarPath = `${media.screenVideoPath}${FOCUS_SIDECAR_SUFFIX}`;
+		const response = await fetch(toFileUrl(sidecarPath)).catch(() => null);
+		if (!response?.ok) {
+			throw new Error(
+				`--follow-windows needs the focus telemetry sidecar (${sidecarPath}); record with "record --follow-windows"`,
+			);
+		}
+		const focusData = (await response.json()) as FocusRecordingData;
+		const followRegions = focusTelemetryToZoomRegions(focusData, {
+			totalMs: probed.durationMs,
+			existingRegions: axcutDocument.zoomRanges,
+		});
+		axcutDocument.zoomRanges.push(...followRegions);
+		axcutDocument.zoomRanges.sort((a, b) => a.startMs - b.startMs);
+		window.electronAPI.cliLog(
+			"info",
+			`Follow-windows: added ${followRegions.length} region(s) from focus telemetry`,
+		);
 	}
 
 	if (request.autoZoom) {
