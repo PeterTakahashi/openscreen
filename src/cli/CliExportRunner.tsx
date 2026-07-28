@@ -33,9 +33,12 @@ import { mixVoiceoverIntoVideo } from "@/lib/exporter/voiceoverMix";
 import type { FocusRecordingData } from "@/lib/windowFocus/contracts";
 import { FOCUS_SIDECAR_SUFFIX } from "@/lib/windowFocus/contracts";
 import { focusTelemetryToZoomRegions } from "@/lib/windowFocus/focusToZoomRegions";
+import type { MultiWindowManifest } from "@/lib/windowSwitch/contracts";
+import { MULTIWINDOW_SIDECAR_SUFFIX } from "@/lib/windowSwitch/contracts";
 import { exportGifNative, exportMultiNative, nativeBridgeClient } from "@/native";
 import type { CompositorClipInput } from "@/native/contracts";
 import { buildSceneDescription, resolveVisibleClips } from "@/native/sceneDescription";
+import { composeMultiWindowVideo } from "./multiWindowCompositor";
 import { clampZoomFocus } from "./vendor/zoomHelpers";
 
 const MP4_EXPORT_FPS = 60;
@@ -190,6 +193,49 @@ async function runExport(request: CliExportRequest): Promise<CliDoneResult> {
 		);
 	}
 
+	// Multi-window captures: composite the per-window videos into one switcher
+	// video (slide transitions on focus hand-offs), stage it next to the output,
+	// and feed it through the native pipeline as the screen recording.
+	let isMultiWindow = false;
+	let switcherTempPath: string | null = null;
+	if (request.followWindows) {
+		const manifestPath = `${media.screenVideoPath}${MULTIWINDOW_SIDECAR_SUFFIX}`;
+		const manifestResponse = await fetch(toFileUrl(manifestPath)).catch(() => null);
+		if (manifestResponse?.ok) {
+			isMultiWindow = true;
+			const manifest = (await manifestResponse.json()) as MultiWindowManifest;
+			window.electronAPI.cliLog(
+				"info",
+				`Multi-window capture: compositing ${manifest.windows.length} windows…`,
+			);
+			const composed = await composeMultiWindowVideo(
+				manifest,
+				manifest.windows.map((captured) => toFileUrl(captured.videoPath)),
+				(progress) =>
+					window.electronAPI.cliProgress({
+						percentage: progress.percentage,
+						currentFrame: progress.currentFrame,
+						totalFrames: progress.totalFrames,
+						phase: "compositing-windows",
+					}),
+			);
+			switcherTempPath = `${outPath.replace(/\.(mp4|gif)$/i, "")}.switcher-tmp.mp4`;
+			const staged = await window.electronAPI.writeExportToPath(
+				await composed.blob.arrayBuffer(),
+				switcherTempPath,
+			);
+			if (!staged.success || !staged.path) {
+				throw new Error(staged.message ?? "Failed to stage the window-switcher video");
+			}
+			media.screenVideoPath = staged.path;
+			media.webcamVideoPath = undefined;
+			window.electronAPI.cliLog(
+				"info",
+				`Window switcher composed: ${composed.timeline.segments.length} segment(s), ${composed.timeline.transitions.length} transition(s)`,
+			);
+		}
+	}
+
 	// Cursor telemetry: only needed to compute --auto-zoom suggestions. The
 	// native compositor discovers the `<video>.cursor.json` sidecar itself.
 	let cursorTelemetry: CursorTelemetryPoint[] = [];
@@ -221,9 +267,9 @@ async function runExport(request: CliExportRequest): Promise<CliDoneResult> {
 	}
 
 	// Display-recording follow mode: turn the window-focus timeline into zoom
-	// regions on the migrated document. (Multi-window switch mode is detected
-	// separately via the .multiwindow.json manifest.)
-	if (request.followWindows) {
+	// regions on the migrated document. Multi-window captures already switched
+	// via the composited switcher video.
+	if (request.followWindows && !isMultiWindow) {
 		const sidecarPath = `${media.screenVideoPath}${FOCUS_SIDECAR_SUFFIX}`;
 		const response = await fetch(toFileUrl(sidecarPath)).catch(() => null);
 		if (!response?.ok) {
@@ -310,6 +356,7 @@ async function runExport(request: CliExportRequest): Promise<CliDoneResult> {
 				format,
 				width: dims.width,
 				height: dims.height,
+				...(switcherTempPath ? { tempFiles: [switcherTempPath] } : {}),
 			};
 		}
 
@@ -355,6 +402,7 @@ async function runExport(request: CliExportRequest): Promise<CliDoneResult> {
 			format,
 			width: outDims.width,
 			height: outDims.height,
+			...(switcherTempPath ? { tempFiles: [switcherTempPath] } : {}),
 		};
 	} finally {
 		unsubscribeProgress?.();
