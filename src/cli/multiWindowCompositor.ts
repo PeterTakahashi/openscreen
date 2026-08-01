@@ -3,7 +3,6 @@
 // hand-offs), and encodes one intermediate video that the normal export
 // pipeline then treats as the "screen recording".
 
-import { VideoMuxer } from "./vendor/muxer";
 import { StreamingVideoDecoder } from "@/lib/exporter/streamingDecoder";
 import type { MultiWindowManifest } from "@/lib/windowSwitch/contracts";
 import {
@@ -11,6 +10,7 @@ import {
 	switchStateAt,
 	type WindowSwitchTimeline,
 } from "@/lib/windowSwitch/switchTimeline";
+import { VideoMuxer } from "./vendor/muxer";
 
 const FRAME_RATE = 60;
 const BITRATE = 18_000_000;
